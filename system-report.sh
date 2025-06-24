@@ -18,10 +18,13 @@ NC='\033[0m' # No Color
 # Global variables
 OS_TYPE=""
 DISTRO=""
-OUTPUT_FILE="system_report_$(date +%Y%m%d_%H%M%S).txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOGS_DIR="${SCRIPT_DIR}/logs"
+OUTPUT_FILE="${LOGS_DIR}/system_report_$(date +%Y%m%d_%H%M%S).log"
 VERBOSE=false
 INCLUDE_DOCKER=true
 INCLUDE_AUDIO=true
+MAX_LOGS=50
 
 # Print colored output
 print_color() {
@@ -113,7 +116,7 @@ get_system_info() {
     print_header "SYSTEM OVERVIEW"
     
     echo "Operating System: $OS_TYPE ($DISTRO)"
-    echo "Hostname: $(hostname 2>/dev/null || echo 'Unknown')"
+    echo "Hostname: $(hostname 2>/dev/null || hostname -s 2>/dev/null || echo 'Unknown')"
     echo "Date/Time: $(date)"
     echo "CPU Cores: $(get_cpu_cores)"
     get_load_average
@@ -271,14 +274,17 @@ get_process_info() {
 # Get Docker information (if available and enabled)
 get_docker_info() {
     if [[ "$INCLUDE_DOCKER" == true ]] && command_exists docker; then
-        print_header "DOCKER CONTAINERS"
+        print_header "DOCKER INFORMATION"
         
         if docker ps >/dev/null 2>&1; then
             echo "=== Running Containers ==="
             docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
             
-            echo -e "\n=== Container Stats ==="
+            echo -e "\n=== Container Resource Usage ==="
             docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" 2>/dev/null
+            
+            echo -e "\n=== Docker System Info ==="
+            docker system df 2>/dev/null || echo "Docker system info not available"
         else
             echo "Docker is installed but not running or permission denied"
         fi
@@ -335,14 +341,17 @@ get_services_info() {
     case "$OS_TYPE" in
         "linux")
             if command_exists systemctl; then
-                echo "=== Active Services (Audio/Media Related) ==="
-                systemctl list-units --type=service --state=running | grep -iE "(audio|sound|pulse|jack|docker|media|plex)" 2>/dev/null || echo "No matching services found"
+                echo "=== Active Services (Audio/Media/Docker Related) ==="
+                systemctl list-units --type=service --state=running | grep -iE "(audio|sound|pulse|jack|docker|media|plex|container)" 2>/dev/null || echo "No matching services found"
+                
+                echo -e "\n=== All Running Services ==="
+                systemctl list-units --type=service --state=running --no-pager | head -15 2>/dev/null
             fi
             ;;
         "macos")
             if command_exists launchctl; then
                 echo "=== Running Services ==="
-                launchctl list | head -10 2>/dev/null || echo "Service info not available"
+                launchctl list | grep -v "^-" | head -15 2>/dev/null || echo "Service info not available"
             fi
             ;;
         "freebsd")
@@ -408,15 +417,20 @@ Usage: $0 [OPTIONS]
 OPTIONS:
     -h, --help          Show this help message
     -v, --verbose       Enable verbose output
-    -o, --output FILE   Specify output file (default: system_report_YYYYMMDD_HHMMSS.txt)
+    -o, --output FILE   Specify output filename (will be saved in logs/ directory)
     --no-docker         Skip Docker information
     --no-audio          Skip audio system information
     --no-temp           Skip temperature information
 
 EXAMPLES:
     $0                  Run with default settings
-    $0 -v -o my_report.txt    Verbose output to custom file
+    $0 -v -o my_report  Verbose output to logs/my_report.log
     $0 --no-docker --no-audio    Skip Docker and audio info
+
+LOG MANAGEMENT:
+    - Logs are automatically saved to logs/ subdirectory
+    - Maximum of $MAX_LOGS log files are kept
+    - Older logs are automatically cleaned up
 
 SUPPORTED SYSTEMS:
     - Linux (all major distributions)
@@ -427,8 +441,35 @@ SUPPORTED SYSTEMS:
 EOF
 }
 
-# Parse command line arguments
-parse_args() {
+# Create logs directory and manage log rotation
+setup_logging() {
+    # Create logs directory if it doesn't exist
+    if [[ ! -d "$LOGS_DIR" ]]; then
+        mkdir -p "$LOGS_DIR" || {
+            print_color "$RED" "Error: Cannot create logs directory: $LOGS_DIR"
+            exit 1
+        }
+        print_color "$GREEN" "Created logs directory: $LOGS_DIR"
+    fi
+    
+    # Clean up old logs if we have too many
+    local log_count
+    log_count=$(find "$LOGS_DIR" -name "system_report_*.log" -type f | wc -l)
+    
+    if [[ $log_count -ge $MAX_LOGS ]]; then
+        local logs_to_remove=$((log_count - MAX_LOGS + 1))
+        print_color "$YELLOW" "Found $log_count log files. Cleaning up $logs_to_remove oldest files..."
+        
+        # Remove oldest log files
+        find "$LOGS_DIR" -name "system_report_*.log" -type f -printf '%T@ %p\n' | \
+        sort -n | \
+        head -n "$logs_to_remove" | \
+        cut -d' ' -f2- | \
+        while IFS= read -r file; do
+            rm -f "$file" && print_color "$YELLOW" "Removed: $(basename "$file")"
+        done
+    fi
+}
     while [[ $# -gt 0 ]]; do
         case $1 in
             -h|--help)
@@ -440,7 +481,10 @@ parse_args() {
                 shift
                 ;;
             -o|--output)
-                OUTPUT_FILE="$2"
+                # If user specifies custom output, still put it in logs directory but allow custom name
+                OUTPUT_FILE="${LOGS_DIR}/$(basename "$2")"
+                # Add .log extension if not present
+                [[ "$OUTPUT_FILE" == *.log ]] || OUTPUT_FILE="${OUTPUT_FILE}.log"
                 shift 2
                 ;;
             --no-docker)
@@ -469,6 +513,9 @@ main() {
     parse_args "$@"
     detect_os
     
+    # Setup logging directory and cleanup
+    setup_logging
+    
     print_color "$GREEN" "Cross-Platform System Monitor"
     print_color "$YELLOW" "Detected OS: $OS_TYPE ($DISTRO)"
     print_color "$BLUE" "Report will be saved to: $OUTPUT_FILE"
@@ -487,6 +534,7 @@ main() {
         get_network_info
         get_process_info
         get_docker_info
+        get_mount_info
         get_audio_info
         get_services_info
         
@@ -497,6 +545,11 @@ main() {
     } | tee "$OUTPUT_FILE"
     
     print_color "$GREEN" "Report saved to: $OUTPUT_FILE"
+    
+    # Show log management info
+    local current_log_count
+    current_log_count=$(find "$LOGS_DIR" -name "system_report_*.log" -type f | wc -l)
+    print_color "$CYAN" "Total logs in directory: $current_log_count/$MAX_LOGS"
 }
 
 # Run main function with all arguments
