@@ -470,6 +470,9 @@ setup_logging() {
         done
     fi
 }
+
+# Parse command line arguments
+parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             -h|--help)
