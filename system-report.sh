@@ -30,13 +30,23 @@ MAX_LOGS=50
 print_color() {
     local color=$1
     local message=$2
-    echo -e "${color}${message}${NC}"
+    if [[ -t 1 ]]; then
+        # Only use colors if outputting to terminal
+        echo -e "${color}${message}${NC}"
+    else
+        # Plain text for file output
+        echo "$message"
+    fi
 }
 
 print_header() {
     local title=$1
     echo ""
-    print_color "$CYAN" "=== $title ==="
+    if [[ -t 1 ]]; then
+        print_color "$CYAN" "=== $title ==="
+    else
+        echo "=== $title ==="
+    fi
 }
 
 # Detect operating system
@@ -116,7 +126,18 @@ get_system_info() {
     print_header "SYSTEM OVERVIEW"
     
     echo "Operating System: $OS_TYPE ($DISTRO)"
-    echo "Hostname: $(hostname 2>/dev/null || hostname -s 2>/dev/null || echo 'Unknown')"
+    # Try multiple ways to get hostname
+    local hostname_result
+    if command_exists hostname; then
+        hostname_result=$(hostname 2>/dev/null)
+    elif command_exists hostnamectl; then
+        hostname_result=$(hostnamectl --static 2>/dev/null)
+    elif [[ -f /etc/hostname ]]; then
+        hostname_result=$(cat /etc/hostname 2>/dev/null)
+    else
+        hostname_result="Unknown"
+    fi
+    echo "Hostname: ${hostname_result:-Unknown}"
     echo "Date/Time: $(date)"
     echo "CPU Cores: $(get_cpu_cores)"
     get_load_average
@@ -148,27 +169,32 @@ get_cpu_info() {
     case "$OS_TYPE" in
         "linux")
             if command_exists lscpu; then
-                lscpu
+                lscpu 2>/dev/null || echo "lscpu command failed"
             elif [[ -f /proc/cpuinfo ]]; then
-                head -20 /proc/cpuinfo
+                echo "=== CPU Info from /proc/cpuinfo ==="
+                head -20 /proc/cpuinfo 2>/dev/null || echo "Could not read /proc/cpuinfo"
+            else
+                echo "CPU information not available"
             fi
             ;;
         "macos")
             echo "CPU Model: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Unknown')"
-            echo "CPU Cores: $(sysctl -n hw.ncpu 2>/dev/null)"
-            echo "CPU Frequency: $(sysctl -n hw.cpufrequency 2>/dev/null | awk '{print $1/1000000 " MHz"}' || echo 'Unknown')"
+            echo "CPU Cores: $(sysctl -n hw.ncpu 2>/dev/null || echo 'Unknown')"
+            echo "CPU Frequency: $(sysctl -n hw.cpufrequency 2>/dev/null | awk '{print $1/1000000 " MHz"}' 2>/dev/null || echo 'Unknown')"
             if command_exists system_profiler; then
-                system_profiler SPHardwareDataType | grep -E "(Processor|Memory|Cores)"
+                system_profiler SPHardwareDataType 2>/dev/null | grep -E "(Processor|Memory|Cores)" || echo "System profiler failed"
             fi
             ;;
         "freebsd")
             echo "CPU Model: $(sysctl -n hw.model 2>/dev/null || echo 'Unknown')"
-            echo "CPU Cores: $(sysctl -n hw.ncpu 2>/dev/null)"
-            echo "CPU Frequency: $(sysctl -n hw.clockrate 2>/dev/null | awk '{print $1 " MHz"}' || echo 'Unknown')"
+            echo "CPU Cores: $(sysctl -n hw.ncpu 2>/dev/null || echo 'Unknown')"
+            echo "CPU Frequency: $(sysctl -n hw.clockrate 2>/dev/null | awk '{print $1 " MHz"}' 2>/dev/null || echo 'Unknown')"
             ;;
         "windows")
             if command_exists wmic; then
                 wmic cpu get Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed /format:list 2>/dev/null || echo "CPU info not available"
+            else
+                echo "CPU info tools not available"
             fi
             ;;
     esac
@@ -181,23 +207,27 @@ get_memory_info() {
     case "$OS_TYPE" in
         "linux"|"freebsd")
             if command_exists free; then
-                free -h
+                free -h 2>/dev/null || echo "free command failed"
             elif [[ -f /proc/meminfo ]]; then
-                head -10 /proc/meminfo
+                head -10 /proc/meminfo 2>/dev/null || echo "Could not read /proc/meminfo"
+            else
+                echo "Memory information not available"
             fi
             ;;
         "macos")
-            echo "Total Memory: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}')"
+            echo "Total Memory: $(sysctl -n hw.memsize 2>/dev/null | awk '{print $1/1024/1024/1024 " GB"}' 2>/dev/null || echo 'Unknown')"
             if command_exists vm_stat; then
-                vm_stat
+                vm_stat 2>/dev/null || echo "vm_stat failed"
             fi
             ;;
         "windows")
             if command_exists wmic; then
                 echo "=== Physical Memory ==="
-                wmic memorychip get Capacity,Speed,MemoryType /format:list 2>/dev/null
+                wmic memorychip get Capacity,Speed,MemoryType /format:list 2>/dev/null || echo "Memory info not available"
                 echo "=== Memory Usage ==="
-                wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:list 2>/dev/null
+                wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:list 2>/dev/null || echo "Memory usage not available"
+            else
+                echo "Memory info tools not available"
             fi
             ;;
     esac
@@ -210,14 +240,18 @@ get_disk_info() {
     case "$OS_TYPE" in
         "linux"|"freebsd"|"macos")
             if command_exists df; then
-                df -h 2>/dev/null || df
+                df -h 2>/dev/null || df 2>/dev/null || echo "df command failed"
+            else
+                echo "Disk information not available"
             fi
             ;;
         "windows")
             if command_exists wmic; then
-                wmic logicaldisk get Size,FreeSpace,Caption /format:list 2>/dev/null
+                wmic logicaldisk get Size,FreeSpace,Caption /format:list 2>/dev/null || echo "Disk info not available"
             elif command_exists df; then
-                df -h 2>/dev/null
+                df -h 2>/dev/null || echo "df command failed"
+            else
+                echo "Disk information not available"
             fi
             ;;
     esac
@@ -230,19 +264,25 @@ get_network_info() {
     case "$OS_TYPE" in
         "linux")
             if command_exists ip; then
-                ip addr show 2>/dev/null | grep -E "(inet |link/)" | head -20
+                ip addr show 2>/dev/null | grep -E "(inet |link/)" | head -20 || echo "ip command failed"
             elif command_exists ifconfig; then
-                ifconfig | head -30
+                ifconfig 2>/dev/null | head -30 || echo "ifconfig failed"
+            else
+                echo "Network information not available"
             fi
             ;;
         "macos"|"freebsd")
             if command_exists ifconfig; then
-                ifconfig | grep -E "(inet |ether)" | head -20
+                ifconfig 2>/dev/null | grep -E "(inet |ether)" | head -20 || echo "ifconfig failed"
+            else
+                echo "Network information not available"
             fi
             ;;
         "windows")
             if command_exists ipconfig; then
-                ipconfig /all | head -30
+                ipconfig /all 2>/dev/null | head -30 || echo "ipconfig failed"
+            else
+                echo "Network information not available"
             fi
             ;;
     esac
@@ -255,17 +295,23 @@ get_process_info() {
     case "$OS_TYPE" in
         "linux"|"freebsd")
             if command_exists ps; then
-                ps aux --sort=-%cpu | head -15 2>/dev/null || ps aux | head -15
+                ps aux --sort=-%cpu 2>/dev/null | head -15 || ps aux 2>/dev/null | head -15 || echo "ps command failed"
+            else
+                echo "Process information not available"
             fi
             ;;
         "macos")
             if command_exists ps; then
-                ps aux -r | head -15
+                ps aux -r 2>/dev/null | head -15 || echo "ps command failed"
+            else
+                echo "Process information not available"
             fi
             ;;
         "windows")
             if command_exists tasklist; then
-                tasklist /fo table | head -15
+                tasklist /fo table 2>/dev/null | head -15 || echo "tasklist failed"
+            else
+                echo "Process information not available"
             fi
             ;;
     esac
@@ -278,17 +324,53 @@ get_docker_info() {
         
         if docker ps >/dev/null 2>&1; then
             echo "=== Running Containers ==="
-            docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
+            docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "Could not list containers"
             
             echo -e "\n=== Container Resource Usage ==="
-            docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" 2>/dev/null
+            docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" 2>/dev/null || echo "Could not get container stats"
             
             echo -e "\n=== Docker System Info ==="
             docker system df 2>/dev/null || echo "Docker system info not available"
         else
             echo "Docker is installed but not running or permission denied"
         fi
+    else
+        echo "Docker not available or disabled"
     fi
+}
+
+# Get mount point information
+get_mount_info() {
+    print_header "MOUNT POINTS & STORAGE"
+    
+    case "$OS_TYPE" in
+        "linux"|"freebsd")
+            echo "=== Network and Special Mounts ==="
+            mount | grep -E "(cifs|nfs|fuse|/mnt|sshfs)" 2>/dev/null || echo "No network/special mounts found"
+            
+            echo -e "\n=== Block Devices ==="
+            if command_exists lsblk; then
+                lsblk -f 2>/dev/null || mount 2>/dev/null | head -10 || echo "Block device info not available"
+            else
+                mount 2>/dev/null | head -10 || echo "Mount info not available"
+            fi
+            ;;
+        "macos")
+            echo "=== Network Mounts ==="
+            mount | grep -E "(cifs|nfs|smb|afp)" 2>/dev/null || echo "No network mounts found"
+            
+            echo -e "\n=== All Mount Points (Top 15) ==="
+            mount 2>/dev/null | head -15 || echo "Mount info not available"
+            ;;
+        "windows")
+            echo "=== Network Drives ==="
+            if command_exists net; then
+                net use 2>/dev/null || echo "No network drives found"
+            else
+                echo "Network drive info not available"
+            fi
+            ;;
+    esac
 }
 
 # Get audio system information
@@ -322,15 +404,21 @@ get_audio_info() {
                 echo "=== Audio Devices ==="
                 if command_exists system_profiler; then
                     system_profiler SPAudioDataType 2>/dev/null | grep -E "(Name|Sample Rate)" || echo "Audio info not available"
+                else
+                    echo "Audio info not available"
                 fi
                 ;;
             "windows")
                 echo "=== Audio Devices ==="
                 if command_exists wmic; then
                     wmic sounddev get Name,Status /format:list 2>/dev/null || echo "Audio info not available"
+                else
+                    echo "Audio info not available"
                 fi
                 ;;
         esac
+    else
+        echo "Audio monitoring disabled"
     fi
 }
 
@@ -342,28 +430,36 @@ get_services_info() {
         "linux")
             if command_exists systemctl; then
                 echo "=== Active Services (Audio/Media/Docker Related) ==="
-                systemctl list-units --type=service --state=running | grep -iE "(audio|sound|pulse|jack|docker|media|plex|container)" 2>/dev/null || echo "No matching services found"
+                systemctl list-units --type=service --state=running 2>/dev/null | grep -iE "(audio|sound|pulse|jack|docker|media|plex|container)" || echo "No matching services found"
                 
                 echo -e "\n=== All Running Services ==="
-                systemctl list-units --type=service --state=running --no-pager | head -15 2>/dev/null
+                systemctl list-units --type=service --state=running --no-pager 2>/dev/null | head -15 || echo "Service info not available"
+            else
+                echo "systemctl not available"
             fi
             ;;
         "macos")
             if command_exists launchctl; then
                 echo "=== Running Services ==="
-                launchctl list | grep -v "^-" | head -15 2>/dev/null || echo "Service info not available"
+                launchctl list 2>/dev/null | grep -v "^-" | head -15 || echo "Service info not available"
+            else
+                echo "launchctl not available"
             fi
             ;;
         "freebsd")
             if command_exists service; then
                 echo "=== Running Services ==="
                 service -e 2>/dev/null || echo "Service info not available"
+            else
+                echo "service command not available"
             fi
             ;;
         "windows")
             if command_exists sc; then
                 echo "=== Running Services ==="
-                sc query state= running | head -20 2>/dev/null || echo "Service info not available"
+                sc query state= running 2>/dev/null | head -20 || echo "Service info not available"
+            else
+                echo "sc command not available"
             fi
             ;;
     esac
@@ -380,7 +476,7 @@ get_temperature_info() {
             elif [[ -d /sys/class/thermal ]]; then
                 for thermal in /sys/class/thermal/thermal_zone*/temp; do
                     if [[ -r "$thermal" ]]; then
-                        temp=$(cat "$thermal")
+                        temp=$(cat "$thermal" 2>/dev/null)
                         zone=$(basename "$(dirname "$thermal")")
                         echo "$zone: $((temp / 1000))°C"
                     fi
@@ -390,7 +486,6 @@ get_temperature_info() {
             fi
             ;;
         "macos")
-            # macOS doesn't have built-in temperature monitoring without third-party tools
             echo "Temperature monitoring requires third-party tools on macOS"
             if command_exists istats; then
                 istats 2>/dev/null || echo "Install iStats for temperature monitoring: gem install iStats"
@@ -399,6 +494,8 @@ get_temperature_info() {
         "freebsd")
             if command_exists sysctl; then
                 sysctl hw.acpi.thermal 2>/dev/null || echo "Temperature info not available"
+            else
+                echo "Temperature monitoring not available"
             fi
             ;;
         "windows")
@@ -454,18 +551,14 @@ setup_logging() {
     
     # Clean up old logs if we have too many
     local log_count
-    log_count=$(find "$LOGS_DIR" -name "system_report_*.log" -type f | wc -l)
+    log_count=$(find "$LOGS_DIR" -name "system_report_*.log" -type f 2>/dev/null | wc -l)
     
     if [[ $log_count -ge $MAX_LOGS ]]; then
         local logs_to_remove=$((log_count - MAX_LOGS + 1))
         print_color "$YELLOW" "Found $log_count log files. Cleaning up $logs_to_remove oldest files..."
         
-        # Remove oldest log files
-        find "$LOGS_DIR" -name "system_report_*.log" -type f -printf '%T@ %p\n' | \
-        sort -n | \
-        head -n "$logs_to_remove" | \
-        cut -d' ' -f2- | \
-        while IFS= read -r file; do
+        # Remove oldest log files (using portable method)
+        find "$LOGS_DIR" -name "system_report_*.log" -type f -exec ls -t {} + 2>/dev/null | tail -n "$logs_to_remove" | while IFS= read -r file; do
             rm -f "$file" && print_color "$YELLOW" "Removed: $(basename "$file")"
         done
     fi
@@ -545,13 +638,18 @@ main() {
             get_temperature_info
         fi
         
-    } | tee "$OUTPUT_FILE"
+    } > "$OUTPUT_FILE" 2>&1
+    
+    # Also display to terminal with colors
+    if [[ -t 1 ]]; then
+        cat "$OUTPUT_FILE"
+    fi
     
     print_color "$GREEN" "Report saved to: $OUTPUT_FILE"
     
     # Show log management info
     local current_log_count
-    current_log_count=$(find "$LOGS_DIR" -name "system_report_*.log" -type f | wc -l)
+    current_log_count=$(find "$LOGS_DIR" -name "system_report_*.log" -type f 2>/dev/null | wc -l)
     print_color "$CYAN" "Total logs in directory: $current_log_count/$MAX_LOGS"
 }
 
